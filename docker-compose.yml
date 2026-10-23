@@ -1,0 +1,27 @@
+# Optional PostgreSQL for local development.
+#
+#   docker compose up -d
+#   DATABASE_URL=postgres://blitzman:blitzman@localhost:5432/blitzman npm run dev
+#
+# If you skip this file, the API runs on embedded PGlite with zero setup.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: blitzman-postgres
+    environment:
+      POSTGRES_USER: blitzman
+      POSTGRES_PASSWORD: blitzman
+      POSTGRES_DB: blitzman
+    ports:
+      - "5432:5432"
+    volumes:
+      - blitzman-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blitzman -d blitzman"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  blitzman-pg:

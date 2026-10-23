@@ -1,0 +1,25 @@
+{
+  "name": "blitzman",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A streaming platform engineered for one billion concurrent viewers. Built in public, phase by phase.",
+  "license": "MIT",
+  "author": "0xMudit",
+  "workspaces": [
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w @blitzman/api\" \"npm run dev -w @blitzman/web\"",
+    "build": "npm run build -w @blitzman/api && npm run build -w @blitzman/web",
+    "typecheck": "npm run typecheck -w @blitzman/api && npm run typecheck -w @blitzman/web",
+    "test": "npm run test -w @blitzman/api",
+    "seed": "npm run seed -w @blitzman/api",
+    "start": "concurrently -n api,web -c cyan,magenta \"npm run start -w @blitzman/api\" \"npm run start -w @blitzman/web\""
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.6"
+  }
+}
