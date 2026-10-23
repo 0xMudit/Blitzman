@@ -26,9 +26,10 @@ Issue a **short-lived signed token** at the moment playback starts:
 - The catalog API never exposes `manifest_url`; it is released only alongside a
   token.
 
-Phase 2 will move token verification to the CDN edge. The important property is
-that **the edge can validate the token without calling the API** — the secret is
-shared with the edge function, and the check is a local HMAC computation.
+Phase 2 moves token verification to the CDN edge (see
+[ADR 0002](0002-edge-session-cookie.md)). The important property is that **the
+edge can validate the token without calling the API** — the secret is shared
+with the edge function, and the check is a local HMAC computation.
 
 ## Consequences
 

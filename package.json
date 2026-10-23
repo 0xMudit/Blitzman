@@ -12,12 +12,12 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w @blitzman/api\" \"npm run dev -w @blitzman/web\"",
-    "build": "npm run build -w @blitzman/api && npm run build -w @blitzman/web",
-    "typecheck": "npm run typecheck -w @blitzman/api && npm run typecheck -w @blitzman/web",
-    "test": "npm run test -w @blitzman/api",
+    "dev": "concurrently -n api,edge-iad,edge-fra,web -c cyan,green,yellow,magenta \"npm run dev -w @blitzman/api\" \"npm run dev -w @blitzman/edge\" \"npm run dev:fra -w @blitzman/edge\" \"npm run dev -w @blitzman/web\"",
+    "build": "npm run build -w @blitzman/api && npm run build -w @blitzman/edge && npm run build -w @blitzman/web",
+    "typecheck": "npm run typecheck -w @blitzman/api && npm run typecheck -w @blitzman/edge && npm run typecheck -w @blitzman/web",
+    "test": "npm run test -w @blitzman/api && npm run test -w @blitzman/edge",
     "seed": "npm run seed -w @blitzman/api",
-    "start": "concurrently -n api,web -c cyan,magenta \"npm run start -w @blitzman/api\" \"npm run start -w @blitzman/web\""
+    "start": "concurrently -n api,edge-iad,edge-fra,web -c cyan,green,yellow,magenta \"npm run start -w @blitzman/api\" \"npm run start -w @blitzman/edge\" \"npm run start:fra -w @blitzman/edge\" \"npm run start -w @blitzman/web\""
   },
   "devDependencies": {
     "concurrently": "^10.0.6"

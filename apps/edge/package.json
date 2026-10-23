@@ -1,0 +1,28 @@
+{
+  "name": "@blitzman/edge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Blitzman edge PoP simulator: HMAC session cookies, manifest rewriting, and a byte cache.",
+  "scripts": {
+    "dev": "tsx watch src/index.ts 4100 edge-iad",
+    "dev:fra": "tsx watch src/index.ts 4101 edge-fra",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js 4100 edge-iad",
+    "start:fra": "node dist/index.js 4101 edge-fra",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test src/app.test.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.1",
+    "dotenv": "^18.0.9",
+    "fastify": "^5.12.7",
+    "jsonwebtoken": "^9.0.3"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^24.19.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}

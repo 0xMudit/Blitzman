@@ -6,12 +6,21 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { formatBitrate, formatDuration } from '@/lib/format';
 
+export interface PlayerEvent {
+  kind: 'session_start' | 'rebuffer' | 'bitrate' | 'error';
+  valueNum?: number;
+  valueText?: string;
+}
+
 interface PlayerProps {
   src: string;
   title: string;
   startAt?: number;
+  /** Send media requests with cookies. Required when src points at an edge PoP. */
+  withCredentials?: boolean;
   onProgress?: (positionSecs: number, durationSecs: number) => void;
   onEnded?: () => void;
+  onEvent?: (event: PlayerEvent) => void;
 }
 
 interface Level {
@@ -20,7 +29,15 @@ interface Level {
   bitrate: number;
 }
 
-export default function Player({ src, title, startAt = 0, onProgress, onEnded }: PlayerProps) {
+export default function Player({
+  src,
+  title,
+  startAt = 0,
+  withCredentials = false,
+  onProgress,
+  onEnded,
+  onEvent,
+}: PlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -28,11 +45,16 @@ export default function Player({ src, title, startAt = 0, onProgress, onEnded }:
   const startAtRef = useRef(startAt);
   const onProgressRef = useRef(onProgress);
   const onEndedRef = useRef(onEnded);
+  const onEventRef = useRef(onEvent);
   const retriesRef = useRef(0);
+  const attachedAtRef = useRef(Date.now());
+  const startupReportedRef = useRef(false);
+  const rebufferStartedAtRef = useRef<number | null>(null);
 
   startAtRef.current = startAt;
   onProgressRef.current = onProgress;
   onEndedRef.current = onEnded;
+  onEventRef.current = onEvent;
 
   const [playing, setPlaying] = useState(false);
   const [buffering, setBuffering] = useState(true);
@@ -100,6 +122,9 @@ export default function Player({ src, title, startAt = 0, onProgress, onEnded }:
     setActiveLevel(null);
     setManualLevel(-1);
     retriesRef.current = 0;
+    attachedAtRef.current = Date.now();
+    startupReportedRef.current = false;
+    rebufferStartedAtRef.current = null;
 
     let hls: Hls | null = null;
 
@@ -111,6 +136,17 @@ export default function Player({ src, title, startAt = 0, onProgress, onEnded }:
         maxBufferLength: 30,
         maxMaxBufferLength: 60,
         abrEwmaDefaultEstimate: 5_000_000,
+        // Only the edge needs cookies; public test CDNs use wildcard CORS and
+        // would reject credentialed requests.
+        ...(withCredentials
+          ? {
+              xhrSetup: (xhr: XMLHttpRequest) => {
+                xhr.withCredentials = true;
+              },
+              fetchSetup: (context, initParams) =>
+                new Request(context.url, { ...initParams, credentials: 'include' }),
+            }
+          : {}),
       });
       hlsRef.current = hls;
       hls.loadSource(src);
@@ -131,7 +167,10 @@ export default function Player({ src, title, startAt = 0, onProgress, onEnded }:
 
       hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
         const level = hls?.levels[data.level];
-        if (level) setActiveLevel({ index: data.level, height: level.height, bitrate: level.bitrate });
+        if (level) {
+          setActiveLevel({ index: data.level, height: level.height, bitrate: level.bitrate });
+          onEventRef.current?.({ kind: 'bitrate', valueNum: level.bitrate });
+        }
       });
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
@@ -147,6 +186,10 @@ export default function Player({ src, title, startAt = 0, onProgress, onEnded }:
         }
         setError(`The stream stopped unexpectedly (${data.details}).`);
         setBuffering(false);
+        onEventRef.current?.({
+          kind: 'error',
+          valueText: `${data.type}:${data.details}`.slice(0, 200),
+        });
       });
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = src;
@@ -159,7 +202,7 @@ export default function Player({ src, title, startAt = 0, onProgress, onEnded }:
       hls?.destroy();
       hlsRef.current = null;
     };
-  }, [src]);
+  }, [src, withCredentials]);
 
   // Report progress on a fixed cadence so long sessions survive interruptions.
   useEffect(() => {
@@ -285,8 +328,25 @@ export default function Player({ src, title, startAt = 0, onProgress, onEnded }:
           const video = videoRef.current;
           if (video && video.duration > 0) onProgressRef.current?.(video.currentTime, video.duration);
         }}
-        onWaiting={() => setBuffering(true)}
-        onPlaying={() => setBuffering(false)}
+        onWaiting={() => {
+          setBuffering(true);
+          if (startupReportedRef.current && rebufferStartedAtRef.current === null) {
+            rebufferStartedAtRef.current = Date.now();
+          }
+        }}
+        onPlaying={() => {
+          setBuffering(false);
+          const now = Date.now();
+          if (!startupReportedRef.current) {
+            startupReportedRef.current = true;
+            onEventRef.current?.({ kind: 'session_start', valueNum: now - attachedAtRef.current });
+          }
+          if (rebufferStartedAtRef.current !== null) {
+            const durationMs = now - rebufferStartedAtRef.current;
+            rebufferStartedAtRef.current = null;
+            onEventRef.current?.({ kind: 'rebuffer', valueNum: durationMs });
+          }
+        }}
         onCanPlay={() => setBuffering(false)}
         onVolumeChange={() => {
           const video = videoRef.current;

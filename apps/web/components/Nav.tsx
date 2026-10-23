@@ -58,7 +58,13 @@ export default function Nav() {
           <Link href="/" className={pathname === '/' ? 'nav-link active' : 'nav-link'}>
             Browse
           </Link>
-          <span className="nav-link nav-link-soon" title="Arrives in Phase 2">
+          <Link
+            href="/status"
+            className={pathname === '/status' ? 'nav-link active' : 'nav-link'}
+          >
+            Status
+          </Link>
+          <span className="nav-link nav-link-soon" title="Arrives in a later phase">
             My List
           </span>
         </nav>

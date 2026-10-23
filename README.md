@@ -20,7 +20,7 @@ Not another Netflix clone. The point is to design and implement the systems that
 
 ---
 
-> **Status — Phase 1 is live.** Email/password auth, catalog, a custom HLS player with adaptive bitrate and quality selection, signed short-TTL playback sessions, per-account concurrency limits, continue-watching with cross-device resume, and automated tests. Later phases — multi-CDN steering, P2P offload, DRM, billing, live — are specified below and not yet built.
+> **Status — Phase 2 is live.** Phase 1 shipped email/password auth, catalog, a custom HLS player with adaptive bitrate and quality selection, signed short-TTL playback sessions, per-account concurrency limits, and continue-watching. Phase 2 adds two local edge PoPs with manifest rewriting, HMAC edge-session cookies, deterministic multi-PoP steering with client failover, token/cookie rotation, and a QoE telemetry pipeline with a live `/status` dashboard. Later phases — real multi-CDN, P2P offload, DRM, billing, live — are specified below and not yet built.
 
 ## Why
 
@@ -53,6 +53,8 @@ Checkboxes are implemented code. Everything unchecked is specified but not built
 
 - [x] Adaptive bitrate HLS playback with manual quality override *(P1)*
 - [x] Signed, short-TTL playback tokens *(P1)*
+- [x] Two-PoP edge delivery with deterministic steering, client failover, and direct-origin fallback *(P2)*
+- [x] Edge manifest rewriting plus a scoped, short-lived HMAC session cookie *(P2)*
 - [ ] Multi-CDN traffic steering (Akamai / Fastly / CloudFront / Cloudflare) with health-based failover
 - [ ] Open Caching / ISP-embedded cache nodes (Netflix Open Connect model)
 - [ ] P2P offload (WebRTC/HTTP mesh) for peak events — target 30–50% egress reduction
@@ -60,7 +62,8 @@ Checkboxes are implemented code. Everything unchecked is specified but not built
 - [ ] Origin-shield hierarchy so cache misses never reach origin
 - [ ] Predictive pre-warming of the next episode before the user clicks play
 - [ ] Regional degradation modes (drop to 480p before dropping the stream)
-- [ ] Edge compute for manifest rewriting, token validation, and ad insertion
+- [x] Edge compute for manifest rewriting and token validation *(P2)*
+- [ ] Edge-side ad insertion
 
 ### 2. Media pipeline
 
@@ -79,8 +82,8 @@ Checkboxes are implemented code. Everything unchecked is specified but not built
 
 - [x] Playback sessions tied to a user and device, with TTL and revocation *(P1)*
 - [x] Per-account concurrent-stream enforcement *(P1)*
+- [x] Manifest token validation at the CDN edge, not just at origin *(P2)*
 - [ ] Multi-DRM: Widevine (L1/L3), FairPlay, PlayReady from one licensing service
-- [ ] Manifest token validation at the CDN edge (not just at origin)
 - [ ] Device provisioning, attestation, and revocation
 - [ ] Bot and credential-stuffing detection
 - [ ] VPN/proxy detection for geo-enforcement
@@ -90,19 +93,20 @@ Checkboxes are implemented code. Everything unchecked is specified but not built
 - [x] Web app (Next.js 16) with a custom HLS player *(P1)*
 - [x] Client-side ABR, quality menu, keyboard shortcuts, fullscreen *(P1)*
 - [x] Cross-device "continue watching" resume *(P1)*
+- [x] QoE instrumentation: startup time, rebuffer duration, bitrate, fatal errors *(P2)*
 - [ ] Native SDKs: Android, Android TV, iOS, tvOS, Roku, Fire TV, Tizen, webOS, consoles
 - [ ] Offline downloads with expiring licenses
 - [ ] Background audio, picture-in-picture, casting (Chromecast/AirPlay)
 - [ ] Low-end device ladder (audio-only and 1 Mbps tier for 2G/3G markets)
-- [ ] QoE telemetry SDK (startup time, rebuffer ratio, bitrate switches, fatal errors)
 
 ### 5. Identity & accounts
 
 - [x] Email/password auth with bcrypt + JWT *(P1)*
+- [x] Edge-validated playback sessions, with no per-segment database lookup *(P2)*
 - [ ] OAuth / SSO (Google, Apple), phone OTP, passkeys
 - [ ] Profiles (kids mode, per-profile recommendations)
 - [ ] Household model, device registry, stream limits per tier
-- [ ] Edge-validated sessions (no per-request database lookup)
+- [ ] Edge-cached user sessions (no per-request database lookup)
 
 ### 6. Catalog & discovery
 
@@ -134,7 +138,8 @@ Checkboxes are implemented code. Everything unchecked is specified but not built
 
 ### 9. Observability & QoE
 
-- [ ] Real-time QoE dashboards per CDN, region, title, and device class
+- [x] Live QoE dashboard: startup latency, rebuffer ratio, bitrate, errors, per-PoP cache health *(P2, local simulator)*
+- [ ] Per-region, per-device-class QoE breakdowns with anomaly alerting
 - [ ] Billions of time-series metrics with anomaly-based alerting
 - [ ] Synthetic playback probes in every region
 - [ ] 24/7 NOC runbooks and incident automation
@@ -165,13 +170,47 @@ Checkboxes are implemented code. Everything unchecked is specified but not built
 │  users · titles · watch_progress · playback_sessions                │
 └─────────────────────────────────────────────────────────────────────┘
 
-Streaming: HLS ABR ladder (public test streams) ──► CDN edge (Phase 2)
+Streaming: HLS ABR ladder (public test streams) ──► edge PoP (Phase 2)
 ```
 
 **Phase 1 deliberately ships two "scale seams":**
 
-1. **Playback authorization is a signed token, not a session cookie.** The token carries `sessionId`, `userId`, `titleId`, and a 120-second expiry, signed with HMAC-SHA256. Phase 2 moves validation to the CDN edge — the API keeps issuing, the edge keeps enforcing.
+1. **Playback authorization is a signed token, not a session cookie.** The token carries `sessionId`, `userId`, `titleId`, the manifest URL, and a 120-second expiry, signed with HMAC-SHA256. Phase 2 moves validation to the CDN edge — the API keeps issuing, the edge keeps enforcing.
 2. **Concurrency is enforced at session creation.** Every play creates a `playback_sessions` row; exceeding `MAX_CONCURRENT_STREAMS` returns a `409 concurrency_limit` instead of silently over-serving. This is the seam where household/device policy becomes real.
+
+## Phase 2 architecture
+
+```
+              control plane                                data plane
+┌──────────────────────────────┐              ┌───────────────────────────────────┐
+│ Fastify API :4000            │              │ Browser (Next.js :3000)           │
+│ auth · catalog · sessions    │  signed JWT  │ custom HLS player · QoE batch     │
+│ concurrency · token rotation │─────────────►│ edge failover · origin fallback   │
+└───────────────┬──────────────┘              └──────────────┬────────────────────┘
+                │ SQL                                        │ 1. POST /v1/session (JWT)
+                ▼                                            │ 2. HttpOnly cookie
+┌──────────────────────────────┐                             │ 3. manifest/segments
+│ PGlite / PostgreSQL          │                             ▼
+│ users · titles · sessions    │              ┌───────────────────────────────────┐
+│ watch_progress · qoe_events  │◄─────────────┤ Edge PoPs (same process, local)   │
+└──────────────────────────────┘  QoE batch   │ edge-iad :4100 · edge-fra :4101   │
+                                               │ verify HMAC · rewrite URIs        │
+                                               │ LRU byte cache · single-flight    │
+                                               └──────────────┬────────────────────┘
+                                                              │ cache miss
+                                                              ▼
+                                               public HLS test origins
+```
+
+**What Phase 2 actually does:**
+
+- `POST /catalog/:slug/playback` now returns `edgeUrls` in a deterministic order derived from the session id. The browser opens an edge session on the first reachable PoP; if one is down it tries the next, then falls back to playing the origin manifest directly.
+- The edge verifies the playback JWT locally. It then issues `blitz_edge`, a 180-second `HttpOnly` cookie signed with `EDGE_SESSION_SECRET`, and rewrites every playlist URI (renditions, keys, init segments, LL-HLS parts) through `/v1/manifest`, `/v1/key`, and `/v1/segment`.
+- The cookie is bound to the manifest origin and directory prefix. A valid cookie is not an open proxy.
+- Before the cookie expires, the player calls `POST /playback/:sessionId/token` and exchanges the rotated JWT for a fresh cookie without interrupting playback.
+- The player batches QoE events (startup, rebuffer, bitrate, error, session end) to `POST /telemetry/qoe`. `/status` renders the rolling hour and each PoP's cache hit ratio.
+
+> **Honest scope:** the two PoPs and their caches are local processes. Steering is deterministic, not geographic; the cache is per-process, not shared. This is a faithful simulator of the edge contract — the interfaces `apps/edge` exposes are the ones a real CDN edge would implement — not a claim of production scale. See [`docs/scale-notes.md`](docs/scale-notes.md) and [ADR 0002](docs/0002-edge-session-cookie.md).
 
 ## Quickstart
 
@@ -186,14 +225,16 @@ npm run dev
 
 Open **http://localhost:3000**, create an account, and press play. The catalog seeds itself on first boot.
 
+`npm run dev` starts four processes: the API (`:4000`), two edge PoPs (`:4100` and `:4101`), and the web app (`:3000`). The watch page shows which PoP served the session and its cache hit ratio; **http://localhost:3000/status** shows the QoE dashboard.
+
 | Command | What it does |
 | --- | --- |
-| `npm run dev` | API on `:4000` + web on `:3000` (hot reload) |
+| `npm run dev` | API `:4000` + edge-iad `:4100` + edge-fra `:4101` + web `:3000` (hot reload) |
 | `npm run seed` | Re-seed the catalog |
-| `npm test` | API integration tests (in-memory PGlite) |
-| `npm run typecheck` | Strict TypeScript across both apps |
-| `npm run build` | Production build of both apps |
-| `npm start` | Run the production builds |
+| `npm test` | API integration tests + edge proxy tests (in-memory PGlite, injected upstream) |
+| `npm run typecheck` | Strict TypeScript across all three apps |
+| `npm run build` | Production build of all three apps |
+| `npm start` | Run the production builds (API, both PoPs, web) |
 
 ### Using PostgreSQL instead of PGlite
 
@@ -219,6 +260,12 @@ Copy [`.env.example`](.env.example) to `.env`. Every value has a development def
 | `PGLITE_DIR` | `.data/pglite` | Embedded database directory |
 | `MAX_CONCURRENT_STREAMS` | `2` | Streams per account |
 | `PLAYBACK_TTL_SECS` | `120` | Playback token lifetime |
+| `EDGE_URLS` | two localhost PoPs | PoP preference list returned by the control plane |
+| `EDGE_SESSION_SECRET` | dev placeholder | Signs the edge session cookie |
+| `EDGE_SESSION_TTL_SECS` | `180` | Edge cookie lifetime |
+| `EDGE_CACHE_BYTES` | `100663296` (96 MB) | Per-PoP byte cache |
+| `EDGE_UPSTREAM_TIMEOUT_MS` | `20000` | Origin fetch timeout |
+| `EDGE_COOKIE_SECURE` | `false` | Add `Secure` when serving over HTTPS |
 
 ## API
 
@@ -230,10 +277,24 @@ Copy [`.env.example`](.env.example) to `.env`. Every value has a development def
 | `GET` | `/auth/me` | Bearer | Current user + active streams |
 | `GET` | `/catalog` | — | Featured title + full catalog |
 | `GET` | `/catalog/:slug` | — | Title detail |
-| `POST` | `/catalog/:slug/playback` | Bearer | Create session, return signed token |
+| `POST` | `/catalog/:slug/playback` | Bearer | Create session, return signed token + steered PoPs |
+| `POST` | `/playback/:sessionId/token` | Bearer | Rotate the playback token without renegotiating |
 | `DELETE` | `/playback/:sessionId` | Bearer | End a playback session |
 | `GET` | `/me/continue` | Bearer | Continue-watching shelf |
 | `PUT` | `/me/progress/:slug` | Bearer | Upsert watch progress, extend session |
+| `POST` | `/telemetry/qoe` | Bearer | Batched player QoE events |
+| `GET` | `/telemetry/summary` | — | Rolling QoE summary for `/status` |
+
+Edge PoP API (`apps/edge`):
+
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| `GET` | `/health` | — | Liveness + cache stats |
+| `POST` | `/v1/session` | Playback JWT | Exchange token for `blitz_edge` cookie |
+| `DELETE` | `/v1/session` | Cookie | Clear the edge cookie |
+| `GET` | `/v1/manifest?u=` | Cookie | Rewritten playlist |
+| `GET` | `/v1/segment?u=` | Cookie | Cached media segment |
+| `GET` | `/v1/key?u=` | Cookie | Cached encryption key |
 
 Errors are consistent: `{ "error": { "code": "concurrency_limit", "message": "..." } }`.
 
@@ -241,8 +302,9 @@ Errors are consistent: `{ "error": { "code": "concurrency_limit", "message": "..
 
 ```
 apps/
-  api/    Fastify 5 + PostgreSQL/PGlite — auth, catalog, playback, progress
-  web/    Next.js 16 — browse, auth, custom HLS player
+  api/    Fastify 5 + PostgreSQL/PGlite — auth, catalog, playback, telemetry
+  edge/   Edge PoP simulator — JWT/cookie auth, manifest rewriting, LRU cache
+  web/    Next.js 16 — browse, auth, custom HLS player, /status QoE dashboard
 .github/  CI: typecheck, integration tests, production builds
 docs/     Scale notes and architecture decision records
 ```
@@ -252,11 +314,11 @@ docs/     Scale notes and architecture decision records
 | Phase | Target | Focus |
 | --- | --- | --- |
 | **1 — Play** ✅ | Working VOD product | Auth, catalog, HLS ABR, signed sessions, concurrency, resume |
-| **2 — Survive** | 1M concurrent | Multi-CDN steering, edge token validation, QoE telemetry, Redis sessions |
+| **2 — Survive** 🚧 | 1M concurrent | Edge delivery + token validation ✅, PoP steering + failover ✅, QoE telemetry ✅; Redis sessions, real multi-CDN, and origin shield next |
 | **3 — Afford** | 100M concurrent | Open Caching/ISP caches, P2P offload, predictive pre-warm, ad tier |
 | **4 — Planet** | 1B concurrent | Multicast, edge compute everywhere, multi-region active-active, live simulcast |
 
-Phase 2 starts with edge token validation and a CDN abstraction layer — the two changes that make every later scaling step possible.
+Phase 2 is live from the product surface: sessions are steered to two PoPs, enforced at the edge with a scoped cookie, and measured end to end. The remaining Phase 2 work is replacing the local simulator's per-process state with shared infrastructure — Redis/HMAC key distribution for edge sessions and real multi-CDN steering from the control plane.
 
 ## Testing
 
@@ -264,7 +326,7 @@ Phase 2 starts with edge token validation and a CDN abstraction layer — the tw
 npm test
 ```
 
-The suite runs the real Fastify app against an in-memory PGlite database and covers registration, login, unauthorized access, catalog reads, signed playback sessions, the concurrency limit, and progress upserts.
+**11 tests.** The API suite runs the real Fastify app against an in-memory PGlite database and covers registration, login, unauthorized access, catalog reads, signed playback sessions, the concurrency limit, token rotation, progress upserts, and QoE ingest/summary. The edge suite injects a fake upstream and covers JWT verification, cookie issuance, manifest URI rewriting (renditions, keys, init segments), cache hits, request coalescing, session/source allowlisting, tampered cookies, and upstream error mapping.
 
 ## License
 

@@ -2,15 +2,27 @@
 
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
-import Player from '@/components/Player';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import Player, { type PlayerEvent } from '@/components/Player';
 import { ApiError, api, getToken, sendQuiet } from '@/lib/api';
-import { formatRuntime } from '@/lib/format';
-import type { ContinueResponse, PlaybackResponse, Title } from '@/lib/types';
+import { closeEdgeSession, edgeHealth, edgeManifestUrl, openEdgeSession } from '@/lib/edge';
+import type { EdgeHealth } from '@/lib/edge';
+import { formatPercent, formatRuntime } from '@/lib/format';
+import type { ContinueResponse, PlaybackResponse, QoeEvent, Title } from '@/lib/types';
 
 interface PlaybackError {
   code: string;
   message: string;
+}
+
+type Delivery =
+  | { mode: 'edge'; url: string; pop: string; ttlSecs: number }
+  | { mode: 'origin'; reason: string };
+
+interface WatchSession {
+  playback: PlaybackResponse;
+  src: string;
+  delivery: Delivery;
 }
 
 export default function WatchPage() {
@@ -19,13 +31,26 @@ export default function WatchPage() {
   const slug = params?.slug ?? '';
 
   const [title, setTitle] = useState<Title | null>(null);
-  const [playback, setPlayback] = useState<PlaybackResponse | null>(null);
+  const [session, setSession] = useState<WatchSession | null>(null);
   const [error, setError] = useState<PlaybackError | null>(null);
   const [resumeAt, setResumeAt] = useState(0);
+  const [edgeStats, setEdgeStats] = useState<EdgeHealth | null>(null);
 
   const sessionIdRef = useRef<string | null>(null);
   const lastSavedRef = useRef({ position: -100, duration: 0 });
   const savedRef = useRef({ position: 0, duration: 0 });
+  const qoeQueueRef = useRef<QoeEvent[]>([]);
+
+  const flushQoe = useCallback(() => {
+    while (qoeQueueRef.current.length > 0) {
+      const events = qoeQueueRef.current.splice(0, 25);
+      sendQuiet('/telemetry/qoe', 'POST', {
+        sessionId: sessionIdRef.current ?? undefined,
+        titleSlug: slug,
+        events,
+      });
+    }
+  }, [slug]);
 
   useEffect(() => {
     if (!slug) return;
@@ -37,6 +62,7 @@ export default function WatchPage() {
 
     let cancelled = false;
     let sessionId: string | null = null;
+    let edgeUrl: string | null = null;
 
     (async () => {
       try {
@@ -50,19 +76,47 @@ export default function WatchPage() {
         const resume = continued.items.find((item) => item.title.slug === slug);
         if (resume && resume.progress < 0.95) setResumeAt(resume.positionSecs);
 
-        const session = await api<PlaybackResponse>(`/catalog/${slug}/playback`, {
+        const playback = await api<PlaybackResponse>(`/catalog/${slug}/playback`, {
           method: 'POST',
           body: { device: 'web' },
         });
 
         if (cancelled) {
-          sendQuiet(`/playback/${session.sessionId}`, 'DELETE');
+          sendQuiet(`/playback/${playback.sessionId}`, 'DELETE');
           return;
         }
 
-        sessionId = session.sessionId;
-        sessionIdRef.current = session.sessionId;
-        setPlayback(session);
+        sessionId = playback.sessionId;
+        sessionIdRef.current = playback.sessionId;
+
+        // Try each PoP the control plane steered us to, then fall back to the
+        // origin. A dead edge should degrade delivery, not playback.
+        let delivery: Delivery = {
+          mode: 'origin',
+          reason: playback.edgeUrls.length === 0 ? 'no edge configured' : 'edge unreachable',
+        };
+        let src = playback.manifestUrl;
+
+        for (const candidate of playback.edgeUrls) {
+          try {
+            const edge = await openEdgeSession(candidate, playback.token);
+            if (cancelled) return;
+            delivery = {
+              mode: 'edge',
+              url: candidate,
+              pop: edge.pop,
+              ttlSecs: edge.ttlSecs,
+            };
+            src = edgeManifestUrl(candidate, playback.manifestUrl);
+            edgeUrl = candidate;
+            break;
+          } catch {
+            // Try the next PoP.
+          }
+        }
+
+        if (cancelled) return;
+        setSession({ playback, src, delivery });
       } catch (cause) {
         if (cancelled) return;
         if (cause instanceof ApiError) {
@@ -80,6 +134,7 @@ export default function WatchPage() {
     return () => {
       cancelled = true;
       if (sessionId) sendQuiet(`/playback/${sessionId}`, 'DELETE');
+      if (edgeUrl) void closeEdgeSession(edgeUrl);
       if (savedRef.current.position > 5 && savedRef.current.duration > 0) {
         sendQuiet(`/me/progress/${slug}`, 'PUT', {
           positionSecs: Math.round(savedRef.current.position),
@@ -88,6 +143,69 @@ export default function WatchPage() {
       }
     };
   }, [slug, router]);
+
+  // Flush QoE every few seconds, and close the session out on unmount.
+  useEffect(() => {
+    const interval = window.setInterval(flushQoe, 5000);
+    return () => {
+      window.clearInterval(interval);
+      if (savedRef.current.position > 0) {
+        qoeQueueRef.current.push({
+          kind: 'session_end',
+          valueNum: Math.round(savedRef.current.position),
+        });
+      }
+      flushQoe();
+    };
+  }, [flushQoe]);
+
+  // Poll the PoP we are actually using so the page can show cache health.
+  useEffect(() => {
+    if (session?.delivery.mode !== 'edge') {
+      setEdgeStats(null);
+      return;
+    }
+    const url = session.delivery.url;
+    let cancelled = false;
+
+    const load = async () => {
+      const health = await edgeHealth(url);
+      if (!cancelled) setEdgeStats(health);
+    };
+    void load();
+    const interval = window.setInterval(load, 8000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [session]);
+
+  // Rotate the playback token and edge cookie before they expire.
+  useEffect(() => {
+    if (session?.delivery.mode !== 'edge') return;
+    const { url, ttlSecs } = session.delivery;
+    const playback = session.playback;
+    let cancelled = false;
+
+    const refresh = async () => {
+      try {
+        const refreshed = await api<{ token: string }>(
+          `/playback/${playback.sessionId}/token`,
+          { method: 'POST' },
+        );
+        if (!cancelled) await openEdgeSession(url, refreshed.token);
+      } catch {
+        // If rotation fails the cookie simply expires and playback stops.
+      }
+    };
+
+    const interval = window.setInterval(refresh, Math.max(30, ttlSecs - 40) * 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [session]);
 
   function saveProgress(position: number, duration: number) {
     savedRef.current = { position, duration };
@@ -99,6 +217,11 @@ export default function WatchPage() {
       durationSecs: Math.round(duration),
       sessionId: sessionIdRef.current ?? undefined,
     });
+  }
+
+  function handlePlayerEvent(event: PlayerEvent) {
+    qoeQueueRef.current.push(event);
+    if (event.kind === 'error') flushQoe();
   }
 
   if (error) {
@@ -127,7 +250,7 @@ export default function WatchPage() {
     );
   }
 
-  if (!playback || !title) {
+  if (!session || !title) {
     return (
       <main className="watch-loading">
         <div className="player-spinner" aria-label="Preparing stream">
@@ -135,21 +258,27 @@ export default function WatchPage() {
         </div>
         <p>
           {title ? title.name : 'Preparing your stream'}…
-          <span className="watch-loading-sub">authorizing playback session</span>
+          <span className="watch-loading-sub">
+            {session ? 'attaching player' : 'authorizing playback session'}
+          </span>
         </p>
       </main>
     );
   }
 
   const durationFromCatalog = title.durationMins * 60;
+  const delivery = session.delivery;
+  const onEdge = delivery.mode === 'edge';
 
   return (
     <main className="watch-page">
       <div className="watch-stage">
         <Player
-          src={playback.manifestUrl}
+          src={session.src}
           title={title.name}
           startAt={resumeAt}
+          withCredentials={onEdge}
+          onEvent={handlePlayerEvent}
           onProgress={saveProgress}
           onEnded={() => {
             const finished = { position: durationFromCatalog, duration: durationFromCatalog };
@@ -185,7 +314,7 @@ export default function WatchPage() {
           <div className="watch-session">
             <span className="pill pill-live">Session active</span>
             <span className="watch-session-id">
-              {playback.sessionId.slice(0, 8)} · token {playback.ttlSecs}s
+              {session.playback.sessionId.slice(0, 8)} · token {session.playback.ttlSecs}s
             </span>
           </div>
         </div>
@@ -195,11 +324,19 @@ export default function WatchPage() {
         <div className="watch-notes">
           <div>
             <span>Delivery</span>
-            <strong>HLS · adaptive bitrate</strong>
+            <strong>
+              {onEdge
+                ? `Edge · ${delivery.pop}${
+                    edgeStats
+                      ? ` · ${formatPercent(edgeStats.cache.hitRatio)} cache hit`
+                      : ''
+                  }`
+                : `Origin · direct (${delivery.reason})`}
+            </strong>
           </div>
           <div>
             <span>Authorization</span>
-            <strong>Signed session token</strong>
+            <strong>{onEdge ? 'Signed edge cookie' : 'Signed manifest token'}</strong>
           </div>
           <div>
             <span>Account limit</span>

@@ -14,6 +14,10 @@ export const config = {
   playbackSecret: process.env.PLAYBACK_SECRET ?? 'dev-playback-secret-change-me',
   databaseUrl: process.env.DATABASE_URL?.trim() || undefined,
   pgliteDir: process.env.PGLITE_DIR ?? '.data/pglite',
+  edgeUrls: (process.env.EDGE_URLS ?? 'http://localhost:4100,http://localhost:4101')
+    .split(',')
+    .map((url) => url.trim())
+    .filter(Boolean),
   maxConcurrentStreams: positiveNumber(process.env.MAX_CONCURRENT_STREAMS, 2),
   playbackTtlSecs: positiveNumber(process.env.PLAYBACK_TTL_SECS, 120),
   seedOnEmpty: process.env.SEED_ON_EMPTY !== 'false',

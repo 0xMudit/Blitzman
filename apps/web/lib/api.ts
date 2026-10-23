@@ -88,7 +88,11 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
 }
 
 /** Fire-and-forget request that survives an unmount. */
-export function sendQuiet(path: string, method: 'PUT' | 'DELETE', body?: unknown): void {
+export function sendQuiet(
+  path: string,
+  method: 'POST' | 'PUT' | 'DELETE',
+  body?: unknown,
+): void {
   const token = getToken();
   if (!token) return;
   void fetch(`${API_URL}${path}`, {

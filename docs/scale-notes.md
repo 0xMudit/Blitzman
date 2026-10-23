@@ -37,8 +37,33 @@ roadmap — not simply more servers.
 
 | Scale concern | Phase 1 implementation | Phase 2 replacement |
 | --- | --- | --- |
-| Playback authorization | Signed JWT, 120 s TTL | Edge HMAC validation |
+| Playback authorization | Signed JWT, 120 s TTL | Edge HMAC validation (shipped) |
 | Concurrency state | Postgres table, TTL rows | Redis + regional counters |
-| Delivery | Single public CDN | Multi-CDN steering + origin shield |
+| Delivery | Single public CDN | Two-PoP steering + failover (shipped locally) |
 | Metadata reads | Postgres | Read replicas + edge cache |
 | Watch progress | Postgres upsert | Kafka → time-series store |
+
+## What Phase 2 actually implements
+
+| Piece | Local number | Production target |
+| --- | --- | --- |
+| Playback token | 120 s HMAC JWT, verified at the edge | Same contract, key distribution service |
+| Edge session cookie | 180 s, `HttpOnly`, scoped to manifest directory | Same, distributed secret, `SameSite=None` if cross-site |
+| PoPs | 2 processes (`edge-iad`, `edge-fra`), per-process LRU | Hundreds of PoPs, shared cache tier |
+| Cache | 96 MB per PoP, 60 s manifest TTL, 1 h segment TTL | Multi-TB per PoP, origin shield |
+| Steering | Deterministic from session id, client failover | Geo/DNS + real-time health and load |
+| QoE | Batched events, 8 s dashboard refresh | Kafka → time-series store, alerting |
+| Origin traffic | One miss per object per PoP | < 1% of requests |
+
+The important honesty constraint: **two localhost processes are not a CDN.** What
+is real is the contract — short-lived tokens, local HMAC verification, URI
+rewriting, byte/object caching, request coalescing, source allowlisting, and QoE
+instrumentation. Those are the seams a production edge plugs into.
+
+## Why the edge cookie is not a URL token
+
+A manifest can contain hundreds of URIs. Putting a bearer token in each one
+leaks it into logs and history, makes every URL unique per session, and destroys
+the shared-cache hit ratio. The exchange in
+[ADR 0002](0002-edge-session-cookie.md) keeps media URLs cacheable and moves
+authorization to an `HttpOnly` cookie that is checked locally at the edge.

@@ -9,6 +9,19 @@ interface PlaybackBody {
   device?: unknown;
 }
 
+/**
+ * Steering: hand the client a PoP order derived from the session id. In
+ * production this is geo/DNS steering; here it deterministically spreads
+ * sessions across the local PoPs.
+ */
+function edgeOrder(sessionId: string): string[] {
+  if (config.edgeUrls.length === 0) return [];
+  const offset =
+    [...sessionId].reduce((sum, character) => sum + character.charCodeAt(0), 0) %
+    config.edgeUrls.length;
+  return [...config.edgeUrls.slice(offset), ...config.edgeUrls.slice(0, offset)];
+}
+
 export async function registerCatalogRoutes(app: FastifyInstance, db: Db): Promise<void> {
   app.get('/catalog', async () => {
     const rows = await db.query<TitleRow>(
@@ -78,7 +91,12 @@ export async function registerCatalogRoutes(app: FastifyInstance, db: Db): Promi
         [sessionId, user.id, title.id, device, expiresAt],
       );
 
-      const token = signPlaybackToken({ sid: sessionId, uid: user.id, tid: title.id });
+      const token = signPlaybackToken({
+        sid: sessionId,
+        uid: user.id,
+        tid: title.id,
+        src: title.manifest_url,
+      });
 
       return reply.code(201).send({
         sessionId,
@@ -86,6 +104,7 @@ export async function registerCatalogRoutes(app: FastifyInstance, db: Db): Promi
         manifestUrl: title.manifest_url,
         expiresAt: expiresAt.toISOString(),
         ttlSecs: config.playbackTtlSecs,
+        edgeUrls: edgeOrder(sessionId),
         title: toTitleSummary(title),
       });
     },

@@ -14,6 +14,8 @@ export interface PlaybackTokenPayload {
   sid: string;
   uid: string;
   tid: string;
+  /** Upstream manifest URL. The edge uses it to build a per-session allowlist. */
+  src: string;
 }
 
 export const hashPassword = (password: string): Promise<string> => bcrypt.hash(password, 10);
@@ -70,11 +72,12 @@ export function verifyPlaybackToken(token: string): PlaybackTokenPayload | null 
     if (
       typeof payload.sid !== 'string' ||
       typeof payload.uid !== 'string' ||
-      typeof payload.tid !== 'string'
+      typeof payload.tid !== 'string' ||
+      typeof payload.src !== 'string'
     ) {
       return null;
     }
-    return { sid: payload.sid, uid: payload.uid, tid: payload.tid };
+    return { sid: payload.sid, uid: payload.uid, tid: payload.tid, src: payload.src };
   } catch {
     return null;
   }

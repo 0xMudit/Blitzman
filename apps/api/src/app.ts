@@ -8,6 +8,7 @@ import { registerAuthRoutes } from './routes/auth.js';
 import { registerCatalogRoutes } from './routes/catalog.js';
 import { registerMeRoutes } from './routes/me.js';
 import { registerPlaybackRoutes } from './routes/playback.js';
+import { registerTelemetryRoutes } from './routes/telemetry.js';
 import { ensureSchema } from './schema.js';
 import { seedIfEmpty } from './seed.js';
 
@@ -52,6 +53,7 @@ export async function buildApp({
   await registerCatalogRoutes(app, db);
   await registerPlaybackRoutes(app, db);
   await registerMeRoutes(app, db);
+  await registerTelemetryRoutes(app, db);
 
   app.setNotFoundHandler((request, reply) =>
     sendError(reply, 404, 'not_found', `No route for ${request.method} ${request.url}.`),

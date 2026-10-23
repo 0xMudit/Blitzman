@@ -53,6 +53,20 @@ const STATEMENTS = [
 
   `create index if not exists playback_sessions_user_expiry_idx
      on playback_sessions (user_id, expires_at)`,
+
+  `create table if not exists qoe_events (
+     id text primary key,
+     user_id text references users(id) on delete set null,
+     session_id text,
+     title_id text references titles(id) on delete set null,
+     kind text not null,
+     value_num double precision,
+     value_text text,
+     created_at timestamptz not null default now()
+   )`,
+
+  `create index if not exists qoe_events_created_idx
+     on qoe_events (created_at desc)`,
 ];
 
 export async function ensureSchema(db: Db): Promise<void> {

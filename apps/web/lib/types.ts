@@ -28,7 +28,36 @@ export interface PlaybackResponse {
   manifestUrl: string;
   expiresAt: string;
   ttlSecs: number;
+  edgeUrls: string[];
   title: Title;
+}
+
+export interface QoeEvent {
+  kind: 'session_start' | 'rebuffer' | 'bitrate' | 'error' | 'session_end';
+  valueNum?: number;
+  valueText?: string;
+}
+
+export interface QoeSummary {
+  windowMins: number;
+  generatedAt: string;
+  activeStreams: number;
+  sessionsStarted: number;
+  rebuffers: number;
+  rebufferMs: number;
+  rebufferRatio: number;
+  startupMs: { avg: number; max: number };
+  avgBitrateBps: number;
+  errors: number;
+  watchSecs: number;
+  events: number;
+  edges: string[];
+  topTitles: Array<{
+    name: string;
+    starts: number;
+    rebuffers: number;
+    rebufferMs: number;
+  }>;
 }
 
 export interface ContinueItem {
